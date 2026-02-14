@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git -C /Users/chandler/Projects/dns-report log --oneline -20)",
+      "WebSearch",
+      "Bash(git -C /Users/chandler/Projects/dns-report config --list)",
+      "WebFetch(domain:docs.pi-hole.net)",
+      "Bash(find:*)",
+      "Bash(grep:*)",
+      "WebFetch(domain:pi-hole.github.io)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:ftl.pi-hole.net)",
+      "Bash(git remote add:*)"
+    ]
+  }
+}

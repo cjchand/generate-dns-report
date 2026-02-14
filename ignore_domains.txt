@@ -1,0 +1,39 @@
+# Ad trackers & telemetry
+doubleclick.net
+googlesyndication.com
+googleadservices.com
+google-analytics.com
+googletagmanager.com
+facebook.net
+fbcdn.net
+crashlytics.com
+app-measurement.com
+firebaselogging.googleapis.com
+
+# Innocuous / infrastructure
+google.com
+gstatic.com
+googleapis.com
+gvt1.com
+gvt2.com
+connectivitycheck.gstatic.com
+clients1.google.com
+clients2.google.com
+clients3.google.com
+clients4.google.com
+mtalk.google.com
+play.googleapis.com
+chromeos-ca.gstatic.com
+
+# Apple / device infra
+apple.com
+icloud.com
+push.apple.com
+
+# Time / NTP
+time.google.com
+ntp.ubuntu.com
+
+# DNS infrastructure
+in-addr.arpa
+local
