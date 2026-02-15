@@ -3,13 +3,21 @@
 
 import argparse
 import json
+import logging
 import os
 import sys
 import time
-from collections import Counter, defaultdict
+from collections import Counter
 from datetime import datetime, timedelta, timezone
 
 import requests
+
+logging.basicConfig(
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%H:%M:%S",
+    level=logging.INFO,
+)
+log = logging.getLogger(__name__)
 
 
 def get_config():
@@ -23,7 +31,7 @@ def get_config():
             missing.append(key)
         config[key] = val
     if missing:
-        print(f"Missing required environment variables: {', '.join(missing)}", file=sys.stderr)
+        log.error("Missing required environment variables: %s", ", ".join(missing))
         sys.exit(1)
     # Strip trailing slash from URL
     config["PIHOLE_URL"] = config["PIHOLE_URL"].rstrip("/")
@@ -40,7 +48,7 @@ def load_ignore_domains(path="ignore_domains.txt"):
                 if line and not line.startswith("#"):
                     domains.add(line.lower())
     except FileNotFoundError:
-        print(f"Warning: {path} not found, no domains will be ignored", file=sys.stderr)
+        log.warning("%s not found, no domains will be ignored", path)
     return domains
 
 
@@ -60,13 +68,17 @@ def should_ignore(domain, ignore_set):
 def authenticate(config):
     """Authenticate with PiHole v6 API and return session ID."""
     url = f"{config['PIHOLE_URL']}/api/auth"
+    log.info("Authenticating with PiHole at %s", config["PIHOLE_URL"])
     resp = requests.post(url, json={"password": config["PIHOLE_PASSWORD"]}, timeout=10)
+    if resp.status_code == 401:
+        log.error("Authentication failed (401): %s", resp.text)
     resp.raise_for_status()
     data = resp.json()
     sid = data.get("session", {}).get("sid")
     if not sid:
-        print(f"Authentication failed: {json.dumps(data, indent=2)}", file=sys.stderr)
+        log.error("Authentication failed: %s", json.dumps(data, indent=2))
         sys.exit(1)
+    log.info("Authenticated successfully")
     return sid
 
 
@@ -75,12 +87,22 @@ def fetch_queries(config, sid, from_ts, until_ts, debug=False):
     headers = {"X-FTL-SID": sid}
     all_queries = []
     cursor = None
+    page_size = 200
+    start = 0
 
+    page = 0
     while True:
-        url = f"{config['PIHOLE_URL']}/api/queries?client={config['CLIENT_IP']}&from={from_ts}&until={until_ts}"
+        page += 1
+        url = (
+            f"{config['PIHOLE_URL']}/api/queries"
+            f"?client_ip={config['CLIENT_IP']}"
+            f"&from={from_ts}&until={until_ts}"
+            f"&start={start}&length={page_size}"
+        )
         if cursor:
             url += f"&cursor={cursor}"
 
+        log.info("Fetching queries page %d (start=%d, collected %d so far)", page, start, len(all_queries))
         resp = requests.get(url, headers=headers, timeout=30)
         resp.raise_for_status()
         data = resp.json()
@@ -89,12 +111,18 @@ def fetch_queries(config, sid, from_ts, until_ts, debug=False):
         all_queries.extend(queries)
 
         if debug and len(all_queries) <= 5:
-            print(f"Sample query data: {json.dumps(queries[:3], indent=2)}")
+            log.debug("Sample query data: %s", json.dumps(queries[:3], indent=2))
 
-        cursor = data.get("cursor")
-        if not cursor or not queries:
+        # Capture cursor on first request to freeze the result set
+        if cursor is None:
+            cursor = data.get("cursor")
+
+        if len(queries) < page_size:
             break
 
+        start += page_size
+
+    log.info("Fetched %d total queries across %d page(s)", len(all_queries), page)
     return all_queries
 
 
@@ -110,14 +138,9 @@ def aggregate(queries, ignore_set, debug=False):
     blocked_count = 0
     domain_counts = Counter()
     blocked_domains = Counter()
-    hourly = defaultdict(int)
 
     for q in queries:
         domain = q.get("domain", "unknown").lower().rstrip(".")
-        timestamp = q.get("time", 0)
-        hour = datetime.fromtimestamp(timestamp, tz=timezone.utc).hour
-
-        hourly[hour] += 1
 
         blocked = is_blocked(q)
         if blocked:
@@ -135,33 +158,16 @@ def aggregate(queries, ignore_set, debug=False):
         "unique": unique_domains,
         "domain_counts": domain_counts,
         "blocked_domains": blocked_domains,
-        "hourly": hourly,
     }
 
+    log.info("Aggregated: %d total, %d blocked, %d unique non-ignored domains",
+             total, blocked_count, unique_domains)
+
     if debug:
-        print(f"\nAggregated stats:")
-        print(f"  Total queries: {total}")
-        print(f"  Blocked: {blocked_count}")
-        print(f"  Unique non-ignored domains: {unique_domains}")
-        print(f"  Top 10 domains: {domain_counts.most_common(10)}")
-        print(f"  Top 5 blocked: {blocked_domains.most_common(5)}")
+        log.debug("Top 10 domains: %s", domain_counts.most_common(10))
+        log.debug("Top 5 blocked: %s", blocked_domains.most_common(5))
 
     return stats
-
-
-def build_hourly_chart(hourly):
-    """Build a text-based hourly activity bar chart."""
-    if not hourly:
-        return "_No hourly data available_"
-
-    max_count = max(hourly.values()) if hourly else 1
-    lines = []
-    for hour in range(24):
-        count = hourly.get(hour, 0)
-        bar_len = round((count / max_count) * 20) if max_count > 0 else 0
-        bar = "\u2588" * bar_len
-        lines.append(f"`{hour:02d}:00` {bar} {count}")
-    return "\n".join(lines)
 
 
 def build_slack_message(stats, report_date):
@@ -171,14 +177,17 @@ def build_slack_message(stats, report_date):
 
     top_visited_text = "\n".join(f"  {d} — {c}" for d, c in top_visited) or "  _None_"
     top_blocked_text = "\n".join(f"  {d} — {c}" for d, c in top_blocked) or "  _None_"
-    hourly_chart = build_hourly_chart(stats["hourly"])
+
+    pct_blocked = (
+        f"{stats['blocked'] / stats['total']:.0%}" if stats["total"] else "0%"
+    )
 
     blocks = [
         {
             "type": "header",
             "text": {
                 "type": "plain_text",
-                "text": f"Chromebook DNS Report — {report_date}",
+                "text": f"Chromebook DNS — {report_date}",
             },
         },
         {
@@ -186,43 +195,25 @@ def build_slack_message(stats, report_date):
             "text": {
                 "type": "mrkdwn",
                 "text": (
-                    f"*Total Queries:* {stats['total']}\n"
-                    f"*Blocked:* {stats['blocked']}\n"
-                    f"*Unique Domains (non-ignored):* {stats['unique']}"
+                    f"*{stats['total']}* queries · "
+                    f"*{stats['blocked']}* blocked ({pct_blocked}) · "
+                    f"*{stats['unique']}* unique"
                 ),
             },
         },
-        {"type": "divider"},
         {
             "type": "section",
             "text": {
                 "type": "mrkdwn",
-                "text": f"*Top 5 Visited (non-ignored):*\n{top_visited_text}",
+                "text": f"*Top Visited:*\n{top_visited_text}",
             },
         },
         {
             "type": "section",
             "text": {
                 "type": "mrkdwn",
-                "text": f"*Top 5 Blocked:*\n{top_blocked_text}",
+                "text": f"*Top Blocked:*\n{top_blocked_text}",
             },
-        },
-        {"type": "divider"},
-        {
-            "type": "section",
-            "text": {
-                "type": "mrkdwn",
-                "text": f"*Hourly Activity:*\n{hourly_chart}",
-            },
-        },
-        {
-            "type": "context",
-            "elements": [
-                {
-                    "type": "mrkdwn",
-                    "text": f"Generated {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}",
-                }
-            ],
         },
     ]
     return blocks
@@ -272,14 +263,15 @@ def send_to_slack(config, blocks, thread_text, debug=False):
     }
 
     if debug:
-        print(f"\nSlack webhook payload:\n{json.dumps(payload, indent=2)}")
-        print("(Skipping send in debug mode)")
+        log.debug("Slack webhook payload:\n%s", json.dumps(payload, indent=2))
+        log.info("Debug mode — skipping Slack send")
         return
 
+    log.info("Sending report to Slack (%d blocks)", len(blocks))
     resp = requests.post(config["SLACK_WEBHOOK_URL"], json=payload, timeout=10)
     resp.raise_for_status()
     if resp.text != "ok":
-        print(f"Slack webhook error: {resp.text}", file=sys.stderr)
+        log.error("Slack webhook error: %s", resp.text)
         sys.exit(1)
 
 
@@ -288,8 +280,14 @@ def main():
     parser.add_argument("--debug", action="store_true", help="Print debug info and skip sending to Slack")
     args = parser.parse_args()
 
+    if args.debug:
+        logging.getLogger(__name__).setLevel(logging.DEBUG)
+
     config = get_config()
+    log.info("Loaded configuration for client %s against %s", config["CLIENT_IP"], config["PIHOLE_URL"])
+
     ignore_set = load_ignore_domains()
+    log.info("Loaded %d ignore domain patterns", len(ignore_set))
 
     # Yesterday's full day in UTC
     now = datetime.now(timezone.utc)
@@ -300,21 +298,20 @@ def main():
     until_ts = int(end_of_day.timestamp())
     report_date = yesterday.strftime("%Y-%m-%d")
 
-    print(f"Fetching queries for {config['CLIENT_IP']} from {report_date}...")
+    log.info("Report date: %s (timestamps %d–%d)", report_date, from_ts, until_ts)
 
     sid = authenticate(config)
     queries = fetch_queries(config, sid, from_ts, until_ts, debug=args.debug)
 
-    print(f"Retrieved {len(queries)} queries")
-
     stats = aggregate(queries, ignore_set, debug=args.debug)
+
+    log.info("Building Slack message")
     blocks = build_slack_message(stats, report_date)
     thread_text = build_thread_reply(stats)
 
     send_to_slack(config, blocks, thread_text, debug=args.debug)
 
-    if not args.debug:
-        print("Report sent to Slack successfully!")
+    log.info("Done — report sent to Slack")
 
 
 if __name__ == "__main__":
