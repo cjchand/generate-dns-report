@@ -14,7 +14,7 @@ import requests
 
 def get_config():
     """Load configuration from environment variables."""
-    required = ["PIHOLE_URL", "PIHOLE_PASSWORD", "SLACK_BOT_TOKEN", "SLACK_CHANNEL", "CLIENT_IP"]
+    required = ["PIHOLE_URL", "PIHOLE_PASSWORD", "SLACK_WEBHOOK_URL", "CLIENT_IP"]
     config = {}
     missing = []
     for key in required:
@@ -243,58 +243,44 @@ def build_thread_reply(stats):
 
 
 def send_to_slack(config, blocks, thread_text, debug=False):
-    """Send the report to Slack: main message + thread reply."""
-    headers = {
-        "Authorization": f"Bearer {config['SLACK_BOT_TOKEN']}",
-        "Content-Type": "application/json",
-    }
+    """Send the report to Slack via incoming webhook."""
+    # Append domain details as additional blocks
+    blocks.append({"type": "divider"})
+    blocks.append({
+        "type": "section",
+        "text": {
+            "type": "mrkdwn",
+            "text": thread_text[:3000],
+        },
+    })
+    # If thread text was truncated, add continuation blocks
+    remaining = thread_text[3000:]
+    while remaining:
+        chunk = remaining[:3000]
+        remaining = remaining[3000:]
+        blocks.append({
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": chunk,
+            },
+        })
 
-    # Main message
     payload = {
-        "channel": config["SLACK_CHANNEL"],
         "blocks": blocks,
         "text": "Chromebook DNS Report",  # fallback
     }
 
     if debug:
-        print(f"\nSlack main payload:\n{json.dumps(payload, indent=2)}")
-        print(f"\nThread reply text length: {len(thread_text)} chars")
+        print(f"\nSlack webhook payload:\n{json.dumps(payload, indent=2)}")
         print("(Skipping send in debug mode)")
         return
 
-    resp = requests.post("https://slack.com/api/chat.postMessage", headers=headers, json=payload, timeout=10)
+    resp = requests.post(config["SLACK_WEBHOOK_URL"], json=payload, timeout=10)
     resp.raise_for_status()
-    data = resp.json()
-    if not data.get("ok"):
-        print(f"Slack API error: {data.get('error')}", file=sys.stderr)
+    if resp.text != "ok":
+        print(f"Slack webhook error: {resp.text}", file=sys.stderr)
         sys.exit(1)
-
-    thread_ts = data["ts"]
-
-    # Thread reply — split into chunks if needed (Slack limit ~4000 chars)
-    max_len = 3900
-    chunks = []
-    current = ""
-    for line in thread_text.split("\n"):
-        if len(current) + len(line) + 1 > max_len:
-            chunks.append(current)
-            current = line
-        else:
-            current = f"{current}\n{line}" if current else line
-    if current:
-        chunks.append(current)
-
-    for chunk in chunks:
-        reply_payload = {
-            "channel": config["SLACK_CHANNEL"],
-            "thread_ts": thread_ts,
-            "text": chunk,
-        }
-        resp = requests.post("https://slack.com/api/chat.postMessage", headers=headers, json=reply_payload, timeout=10)
-        resp.raise_for_status()
-        reply_data = resp.json()
-        if not reply_data.get("ok"):
-            print(f"Slack thread reply error: {reply_data.get('error')}", file=sys.stderr)
 
 
 def main():

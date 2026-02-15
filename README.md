@@ -10,15 +10,14 @@ Daily automated report of Chromebook DNS activity from PiHole v6, sent to Slack.
 |---|---|
 | `PIHOLE_URL` | PiHole address (no trailing slash) |
 | `PIHOLE_PASSWORD` | PiHole application password |
-| `SLACK_BOT_TOKEN` | Slack bot token with `chat:write` scope |
-| `SLACK_CHANNEL` | Slack channel ID |
+| `SLACK_WEBHOOK_URL` | Slack incoming webhook URL |
 | `CLIENT_IP` | Chromebook's static IP |
 
 Copy `.env.example` to `.env` and fill in your values for local development.
 
-### Slack Bot
+### Slack Webhook
 
-Create a Slack app with the `chat:write` bot scope and install it to your workspace. Invite the bot to the target channel.
+Create a Slack app with an incoming webhook and activate it for the target channel. Copy the webhook URL to your `SLACK_WEBHOOK_URL` environment variable.
 
 ### Ignore List
 
