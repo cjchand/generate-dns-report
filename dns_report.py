@@ -6,11 +6,11 @@ import json
 import logging
 import os
 import sys
-import time
 from collections import Counter
 from datetime import datetime, timedelta, timezone
 
 import requests
+import tldextract
 
 logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -63,6 +63,34 @@ def should_ignore(domain, ignore_set):
         if parent in ignore_set:
             return True
     return False
+
+
+def rollup_domain(domain):
+    """Roll up a full domain to its registered domain (e.g. s.youtube.com → youtube.com).
+
+    Falls back to the original domain string if tldextract can't determine a
+    registered domain (e.g. bare hostnames, .local, in-addr.arpa).
+    """
+    extracted = tldextract.extract(domain)
+    return extracted.top_domain_under_public_suffix or domain
+
+
+def load_categories(path="domain_categories.json"):
+    """Load domain→category mapping from JSON file."""
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except FileNotFoundError:
+        log.warning("%s not found, all domains will show as Unknown", path)
+        return {}
+    except json.JSONDecodeError as e:
+        log.warning("Failed to parse %s: %s", path, e)
+        return {}
+
+
+def get_category(domain, categories):
+    """Return the human-readable category for a domain, or 'Unknown'."""
+    return categories.get(domain, "Unknown")
 
 
 def authenticate(config):
@@ -145,10 +173,16 @@ def aggregate(queries, ignore_set, debug=False):
         blocked = is_blocked(q)
         if blocked:
             blocked_count += 1
-            blocked_domains[domain] += 1
 
-        if not should_ignore(domain, ignore_set):
-            domain_counts[domain] += 1
+        # should_ignore runs on the full original domain
+        if should_ignore(domain, ignore_set):
+            continue
+
+        # Roll up to registered domain before counting
+        rolled = rollup_domain(domain)
+        domain_counts[rolled] += 1
+        if blocked:
+            blocked_domains[rolled] += 1
 
     unique_domains = len(domain_counts)
 
@@ -170,12 +204,39 @@ def aggregate(queries, ignore_set, debug=False):
     return stats
 
 
-def build_slack_message(stats, report_date):
+def _build_domain_table(domain_counts, categories):
+    """Build a monospace table of domains, categories, and query counts."""
+    rows = domain_counts.most_common()
+    if not rows:
+        return "  _None_"
+
+    # Compute column widths
+    dom_width = max(len("Domain"), max(len(d) for d, _ in rows))
+    cat_width = max(len("Category"), max(len(get_category(d, categories)) for d, _ in rows))
+    cnt_width = max(len("Queries"), len(str(rows[0][1])))
+
+    header = f"{'Domain':<{dom_width}}  {'Category':<{cat_width}}  {'Queries':>{cnt_width}}"
+    separator = "─" * (dom_width + 2 + cat_width + 2 + cnt_width)
+
+    lines = [header, separator]
+    for domain, count in rows:
+        cat = get_category(domain, categories)
+        lines.append(f"{domain:<{dom_width}}  {cat:<{cat_width}}  {count:>{cnt_width}}")
+
+    return "```\n" + "\n".join(lines) + "\n```"
+
+
+def build_slack_message(stats, report_date, categories):
     """Build the main Slack message blocks."""
     top_visited = stats["domain_counts"].most_common(5)
     top_blocked = stats["blocked_domains"].most_common(5)
 
-    top_visited_text = "\n".join(f"  {d} — {c}" for d, c in top_visited) or "  _None_"
+    top_visited_lines = []
+    for d, c in top_visited:
+        cat = get_category(d, categories)
+        top_visited_lines.append(f"  {d} ({cat}) — {c}")
+    top_visited_text = "\n".join(top_visited_lines) or "  _None_"
+
     top_blocked_text = "\n".join(f"  {d} — {c}" for d, c in top_blocked) or "  _None_"
 
     pct_blocked = (
@@ -219,16 +280,23 @@ def build_slack_message(stats, report_date):
     return blocks
 
 
-def build_thread_reply(stats):
-    """Build the thread reply with complete domain lists."""
-    lines = ["*All Non-Ignored Domains:*\n"]
-    for domain, count in sorted(stats["domain_counts"].items(), key=lambda x: -x[1]):
-        lines.append(f"  {domain} — {count}")
+def build_thread_reply(stats, categories):
+    """Build the thread reply with a complete domain table."""
+    table = _build_domain_table(stats["domain_counts"], categories)
+    lines = ["*All Non-Ignored Domains:*\n", table]
 
     if stats["blocked_domains"]:
+        blocked_rows = stats["blocked_domains"].most_common()
+        dom_width = max(len("Domain"), max(len(d) for d, _ in blocked_rows))
+        cnt_width = max(len("Queries"), len(str(blocked_rows[0][1])))
+        header = f"{'Domain':<{dom_width}}  {'Queries':>{cnt_width}}"
+        separator = "─" * (dom_width + 2 + cnt_width)
+        blocked_lines = [header, separator]
+        for domain, count in blocked_rows:
+            blocked_lines.append(f"{domain:<{dom_width}}  {count:>{cnt_width}}")
+        blocked_table = "```\n" + "\n".join(blocked_lines) + "\n```"
         lines.append("\n*All Blocked Domains:*\n")
-        for domain, count in sorted(stats["blocked_domains"].items(), key=lambda x: -x[1]):
-            lines.append(f"  {domain} — {count}")
+        lines.append(blocked_table)
 
     return "\n".join(lines)
 
@@ -289,6 +357,9 @@ def main():
     ignore_set = load_ignore_domains()
     log.info("Loaded %d ignore domain patterns", len(ignore_set))
 
+    categories = load_categories()
+    log.info("Loaded %d domain category entries", len(categories))
+
     # Yesterday's full day in UTC
     now = datetime.now(timezone.utc)
     yesterday = now - timedelta(days=1)
@@ -306,8 +377,8 @@ def main():
     stats = aggregate(queries, ignore_set, debug=args.debug)
 
     log.info("Building Slack message")
-    blocks = build_slack_message(stats, report_date)
-    thread_text = build_thread_reply(stats)
+    blocks = build_slack_message(stats, report_date, categories)
+    thread_text = build_thread_reply(stats, categories)
 
     send_to_slack(config, blocks, thread_text, debug=args.debug)
 
