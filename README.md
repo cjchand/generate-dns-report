@@ -1,6 +1,8 @@
 # dns-report
 
-Daily automated report of Chromebook DNS activity from PiHole v6, sent to Slack.
+Daily automated report of a client's DNS activity from PiHole v6, sent to Slack.
+
+Run one instance per device you want to report on, each with its own `CLIENT_IP` and `DEVICE_NAME`.
 
 ## Setup
 
@@ -11,7 +13,8 @@ Daily automated report of Chromebook DNS activity from PiHole v6, sent to Slack.
 | `PIHOLE_URL` | PiHole address (no trailing slash) |
 | `PIHOLE_PASSWORD` | PiHole application password |
 | `SLACK_WEBHOOK_URL` | Slack incoming webhook URL |
-| `CLIENT_IP` | Chromebook's static IP |
+| `CLIENT_IP` | Static IP of the device to report on |
+| `DEVICE_NAME` | Optional. Label used in the Slack report title (default: `Chromebook`) |
 
 Copy `.env.example` to `.env` and fill in your values for local development.
 

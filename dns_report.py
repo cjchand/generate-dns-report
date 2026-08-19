@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Daily DNS activity report for a Chromebook from PiHole v6, sent to Slack."""
+"""Daily DNS activity report for a single client from PiHole v6, sent to Slack."""
 
 import argparse
 import json
@@ -35,6 +35,8 @@ def get_config():
         sys.exit(1)
     # Strip trailing slash from URL
     config["PIHOLE_URL"] = config["PIHOLE_URL"].rstrip("/")
+    # Label used in the Slack report title
+    config["DEVICE_NAME"] = os.environ.get("DEVICE_NAME") or "Chromebook"
     return config
 
 
@@ -226,7 +228,7 @@ def _build_domain_table(domain_counts, categories):
     return "```\n" + "\n".join(lines) + "\n```"
 
 
-def build_slack_message(stats, report_date, categories):
+def build_slack_message(stats, report_date, categories, device_name):
     """Build the main Slack message blocks."""
     top_visited = stats["domain_counts"].most_common(5)
     top_blocked = stats["blocked_domains"].most_common(5)
@@ -248,7 +250,7 @@ def build_slack_message(stats, report_date, categories):
             "type": "header",
             "text": {
                 "type": "plain_text",
-                "text": f"Chromebook DNS — {report_date}",
+                "text": f"{device_name} DNS — {report_date}",
             },
         },
         {
@@ -327,7 +329,7 @@ def send_to_slack(config, blocks, thread_text, debug=False):
 
     payload = {
         "blocks": blocks,
-        "text": "Chromebook DNS Report",  # fallback
+        "text": f"{config['DEVICE_NAME']} DNS Report",  # fallback
     }
 
     if debug:
@@ -352,7 +354,12 @@ def main():
         logging.getLogger(__name__).setLevel(logging.DEBUG)
 
     config = get_config()
-    log.info("Loaded configuration for client %s against %s", config["CLIENT_IP"], config["PIHOLE_URL"])
+    log.info(
+        "Loaded configuration for %s (%s) against %s",
+        config["DEVICE_NAME"],
+        config["CLIENT_IP"],
+        config["PIHOLE_URL"],
+    )
 
     ignore_set = load_ignore_domains()
     log.info("Loaded %d ignore domain patterns", len(ignore_set))
@@ -377,7 +384,7 @@ def main():
     stats = aggregate(queries, ignore_set, debug=args.debug)
 
     log.info("Building Slack message")
-    blocks = build_slack_message(stats, report_date, categories)
+    blocks = build_slack_message(stats, report_date, categories, config["DEVICE_NAME"])
     thread_text = build_thread_reply(stats, categories)
 
     send_to_slack(config, blocks, thread_text, debug=args.debug)
